@@ -12,7 +12,9 @@ import androidx.media3.exoplayer.source.MergingMediaSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.jellyfin.mobile.data.dao.DownloadDao
+import org.jellyfin.mobile.R
 import org.jellyfin.mobile.downloads.DownloadFileType
+import org.jellyfin.mobile.downloads.DownloadStatus
 import org.jellyfin.mobile.player.PlayerException
 import org.jellyfin.mobile.player.PlayerViewModel
 import org.jellyfin.mobile.player.deviceprofile.DeviceProfileBuilder
@@ -54,6 +56,15 @@ class QueueManager(
     private var currentQueue: List<UUID> = emptyList()
     private var currentQueueIndex: Int = 0
 
+    private var previousPlayable = true
+    private var nextPlayable = true
+
+    private val _notice: MutableLiveData<Int> = MutableLiveData()
+
+    /** String resource ids for short messages to show the user, e.g. when skipping is blocked. */
+    val notice: LiveData<Int>
+        get() = _notice
+
     private var playbackRetries = 0
     private var lastPlaybackError = 0L
 
@@ -78,6 +89,8 @@ class QueueManager(
             currentQueue.isNotEmpty() -> currentQueue[currentQueueIndex]
             else -> playOptions.mediaSourceId?.toUUIDOrNull()
         } ?: return PlayerException.InvalidPlayOptions()
+
+        updateNeighbourAvailability(currentQueueIndex, local = playOptions.playFromDownloads == true)
 
         val maxStreamingBitrate = preferences?.let {
             withContext(Dispatchers.IO) {
@@ -119,7 +132,7 @@ class QueueManager(
     ): PlayerException? {
         val download = withContext(Dispatchers.IO) {
             downloadDao.getDownloadByItemId(itemId)
-        } ?: return PlayerException.UnsupportedContent()
+        }?.takeIf { it.status == DownloadStatus.DOWNLOADED } ?: return PlayerException.UnsupportedContent()
 
         val files = withContext(Dispatchers.IO) {
             downloadDao.getFiles(download.id)
@@ -139,12 +152,54 @@ class QueueManager(
         audioStreamIndex?.let { index -> mediaSource.selectAudioStream(mediaSource.audioStreams[index]) }
         subtitleStreamIndex?.let { index -> mediaSource.selectSubtitleStream(mediaSource.subtitleStreams[index]) }
 
+        // Ensure transcoding of a previous remote element is stopped
+        (getCurrentMediaSourceOrNull() as? RemoteJellyfinMediaSource)?.let { viewModel.stopTranscoding(it) }
+
         _currentMediaSource.value = mediaSource
 
         // Load new media source
         viewModel.load(mediaSource, prepareStreams(mediaSource), playWhenReady)
 
         return null
+    }
+
+    private suspend fun hasCompletedDownload(itemId: UUID): Boolean = withContext(Dispatchers.IO) {
+        downloadDao.getDownloadByItemId(itemId)?.status == DownloadStatus.DOWNLOADED
+    }
+
+    /**
+     * Play the queue item at [index]. A queue started from downloads only plays downloads.
+     * Otherwise the server is tried first, and if that fails the completed download is used
+     * when there is one. If neither works nothing is skipped or started: the queue stays on
+     * the current item and the user is notified.
+     *
+     * @return true if playback of the item was started.
+     */
+    private suspend fun playQueueItem(index: Int, maxStreamingBitrate: Int?): Boolean {
+        val itemId = currentQueue[index]
+        val previousIndex = currentQueueIndex
+        val wasLocal = getCurrentMediaSourceOrNull() is LocalJellyfinMediaSource
+        // Update before loading so observers of the new media source see correct next/previous state
+        currentQueueIndex = index
+        updateNeighbourAvailability(index, wasLocal)
+
+        var error = when {
+            wasLocal -> startDownloadPlayback(itemId = itemId, playWhenReady = true)
+            else -> startRemotePlayback(itemId = itemId, mediaSourceId = null, maxStreamingBitrate = maxStreamingBitrate)
+        }
+        if (error != null && !wasLocal) {
+            // Server unreachable or item unavailable, fall back to a download if there is one
+            error = startDownloadPlayback(itemId = itemId, playWhenReady = true)
+            if (error == null) updateNeighbourAvailability(index, local = true)
+        }
+
+        if (error != null) {
+            currentQueueIndex = previousIndex
+            updateNeighbourAvailability(previousIndex, wasLocal)
+            _notice.postValue(R.string.player_error_item_not_downloaded)
+            return false
+        }
+        return true
     }
 
     /**
@@ -175,8 +230,8 @@ class QueueManager(
             enableDirectStream = enableDirectStream,
         ).onSuccess { jellyfinMediaSource ->
             // Ensure transcoding of the current element is stopped
-            getCurrentMediaSourceOrNull()?.let { oldMediaSource ->
-                viewModel.stopTranscoding(oldMediaSource as RemoteJellyfinMediaSource)
+            (getCurrentMediaSourceOrNull() as? RemoteJellyfinMediaSource)?.let { oldMediaSource ->
+                viewModel.stopTranscoding(oldMediaSource)
             }
 
             _currentMediaSource.value = jellyfinMediaSource
@@ -276,43 +331,45 @@ class QueueManager(
         ) == null
     }
 
-    fun hasPrevious(): Boolean = currentQueue.isNotEmpty() && currentQueueIndex > 0
+    fun hasPrevious(): Boolean = currentQueue.isNotEmpty() && currentQueueIndex > 0 && previousPlayable
 
-    fun hasNext(): Boolean = currentQueue.isNotEmpty() && currentQueueIndex < currentQueue.lastIndex
+    fun hasNext(): Boolean = currentQueue.isNotEmpty() && currentQueueIndex < currentQueue.lastIndex && nextPlayable
+
+    /**
+     * Cache whether the neighbours of [index] can be played right now, because [hasNext] and
+     * [hasPrevious] can't query the database on the main thread. When playing from downloads
+     * only downloaded neighbours are playable. When streaming, reachability of the server is
+     * unknown, so neighbours are assumed playable; [playQueueItem] falls back to downloads
+     * or notifies the user if that turns out to be wrong.
+     */
+    private suspend fun updateNeighbourAvailability(index: Int, local: Boolean) {
+        suspend fun playable(i: Int): Boolean = when {
+            i !in currentQueue.indices -> false
+            !local -> true
+            else -> hasCompletedDownload(currentQueue[i])
+        }
+        previousPlayable = playable(index - 1)
+        nextPlayable = playable(index + 1)
+    }
 
     suspend fun previous(): Boolean {
         if (!hasPrevious()) return false
 
-        val currentMediaSource = getCurrentMediaSourceOrNull() as? RemoteJellyfinMediaSource ?: return false
+        val currentMediaSource = getCurrentMediaSourceOrNull() ?: return false
 
         resetPlaybackFallback()
 
-        startRemotePlayback(
-            itemId = currentQueue[--currentQueueIndex],
-            mediaSourceId = null,
-            maxStreamingBitrate = currentMediaSource.maxStreamingBitrate,
-        )
-        return true
+        return playQueueItem(currentQueueIndex - 1, (currentMediaSource as? RemoteJellyfinMediaSource)?.maxStreamingBitrate)
     }
 
     suspend fun next(): Boolean {
         if (!hasNext()) return false
 
+        val currentMediaSource = getCurrentMediaSourceOrNull() ?: return false
+
         resetPlaybackFallback()
 
-        when (val currentMediaSource = getCurrentMediaSourceOrNull()) {
-            is LocalJellyfinMediaSource -> startDownloadPlayback(
-                itemId = currentQueue[++currentQueueIndex],
-                playWhenReady = true,
-            )
-            is RemoteJellyfinMediaSource -> startRemotePlayback(
-                itemId = currentQueue[++currentQueueIndex],
-                mediaSourceId = null,
-                maxStreamingBitrate = currentMediaSource.maxStreamingBitrate,
-            )
-            null -> return false
-        }
-        return true
+        return playQueueItem(currentQueueIndex + 1, (currentMediaSource as? RemoteJellyfinMediaSource)?.maxStreamingBitrate)
     }
 
     /**

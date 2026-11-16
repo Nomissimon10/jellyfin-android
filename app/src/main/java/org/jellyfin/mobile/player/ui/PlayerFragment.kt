@@ -119,6 +119,9 @@ class PlayerFragment : Fragment(), BackPressInterceptor {
             val safeMessage = message.ifEmpty { requireContext().getString(R.string.player_error_unspecific_exception) }
             requireContext().toast(safeMessage)
         }
+        viewModel.queueManager.notice.observe(this) { messageRes ->
+            requireContext().toast(messageRes)
+        }
         viewModel.queueManager.currentMediaSource.observe(this) { mediaSource ->
             if (mediaSource.selectedVideoStream?.isLandscape == false) {
                 // For portrait videos, immediately enable fullscreen

@@ -89,6 +89,22 @@ class AppPreferences(context: Context) {
         )!!
         set(value) = sharedPreferences.edit { putString(Constants.PREF_MEDIA_SEGMENT_ACTIONS, value) }
 
+    /**
+     * Last known value of the server-side "play next episode automatically" user setting,
+     * cached so it is still available when the server can't be reached. Null if never fetched.
+     */
+    var autoPlayNextEpisode: Boolean?
+        get() = if (sharedPreferences.contains(Constants.PREF_AUTO_PLAY_NEXT_EPISODE)) {
+            sharedPreferences.getBoolean(Constants.PREF_AUTO_PLAY_NEXT_EPISODE, false)
+        } else {
+            null
+        }
+        set(value) {
+            sharedPreferences.edit {
+                if (value != null) putBoolean(Constants.PREF_AUTO_PLAY_NEXT_EPISODE, value) else remove(Constants.PREF_AUTO_PLAY_NEXT_EPISODE)
+            }
+        }
+
     val musicNotificationAlwaysDismissible: Boolean
         get() = sharedPreferences.getBoolean(Constants.PREF_MUSIC_NOTIFICATION_ALWAYS_DISMISSIBLE, false)
 

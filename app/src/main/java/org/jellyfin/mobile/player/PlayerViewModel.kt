@@ -48,6 +48,7 @@ import org.jellyfin.mobile.player.mediasegments.MediaSegmentAction
 import org.jellyfin.mobile.player.mediasegments.MediaSegmentRepository
 import org.jellyfin.mobile.player.queue.QueueManager
 import org.jellyfin.mobile.player.source.JellyfinMediaSource
+import org.jellyfin.mobile.player.source.LocalJellyfinMediaSource
 import org.jellyfin.mobile.player.source.RemoteJellyfinMediaSource
 import org.jellyfin.mobile.player.ui.DecoderType
 import org.jellyfin.mobile.player.ui.DisplayPreferences
@@ -166,7 +167,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application),
     private val mediaSessionCallback = PlayerMediaSessionCallback(this)
 
     private var displayPreferences = DisplayPreferences()
-    private var autoPlayNextEpisodeEnabled: Boolean = false
+    /** Server setting; falls back to the last cached value, null when unknown. */
+    private var autoPlayNextEpisodeEnabled: Boolean? = appPreferences.autoPlayNextEpisode
 
     init {
         ProcessLifecycleOwner.get().lifecycle.addObserver(lifecycleObserver)
@@ -201,8 +203,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application),
                     userApi.getCurrentUser().content.configuration
                 }
                 autoPlayNextEpisodeEnabled = userConfig?.enableNextEpisodeAutoPlay ?: false
+                appPreferences.autoPlayNextEpisode = autoPlayNextEpisodeEnabled
             } catch (e: ApiClientException) {
                 Timber.e(e, "Failed to load auto play preference")
+                // Server unreachable (e.g. offline): keep the last known cached value, if any
             }
         }
 
@@ -761,8 +765,12 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application),
                     player.reportPlaybackState()
                 }
                 Player.STATE_ENDED -> {
+                    val finishedLocalItemId = (mediaSourceOrNull as? LocalJellyfinMediaSource)?.itemId
                     reportPlaybackStop()
-                    if (!autoPlayNextEpisodeEnabled || !queueManager.next()) {
+                    // If the setting is unknown (never fetched and server unreachable), assume enabled
+                    // for downloads, so a queue of downloaded episodes doesn't stop after one item.
+                    val autoPlayEnabled = autoPlayNextEpisodeEnabled ?: (finishedLocalItemId != null)
+                    if (!autoPlayEnabled || !queueManager.next()) {
                         releasePlayer()
                     }
                 }

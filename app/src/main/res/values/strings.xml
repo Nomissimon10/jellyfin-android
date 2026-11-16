@@ -68,6 +68,7 @@
     <string name="notification_action_stop">Stop</string>
 
     <string name="player_error_invalid_play_options">Unable to resolve playback info</string>
+    <string name="player_error_item_not_downloaded">Couldn\'t play the next or previous item. It couldn\'t be loaded from the server and isn\'t downloaded.</string>
     <string name="player_error_network_failure">Unable to load media info from server</string>
     <string name="player_error_unsupported_content">Media cannot be played by this device</string>
     <string name="player_error_unspecific_exception">Something went wrong with the player</string>

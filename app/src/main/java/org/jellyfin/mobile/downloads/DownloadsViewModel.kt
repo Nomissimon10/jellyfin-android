@@ -43,10 +43,11 @@ class DownloadsViewModel : ViewModel(), KoinComponent {
     fun openDownload(download: DownloadEntity) {
         when (download.item.mediaType) {
             MediaType.VIDEO -> {
+                val queue = buildEpisodeQueue(download)
                 val playOptions = PlayOptions(
-                    ids = listOf(download.itemId),
+                    ids = queue.ids,
                     mediaSourceId = download.itemId.toString(),
-                    startIndex = 0,
+                    startIndex = queue.startIndex,
                     startPosition = null,
                     audioStreamIndex = null,
                     subtitleStreamIndex = null,
@@ -75,6 +76,18 @@ class DownloadsViewModel : ViewModel(), KoinComponent {
                 }
             }
         }
+    }
+
+    /** Queue of consecutive downloaded episodes around [download], or just [download] itself. */
+    private fun buildEpisodeQueue(download: DownloadEntity): EpisodeQueueBuilder.Result {
+        val single = EpisodeQueueBuilder.Result(listOf(download.itemId), 0)
+        val seriesId = download.item.seriesId ?: return single
+        val current = EpisodeQueueBuilder.toEntry(download) ?: return single
+        val candidates = downloads.value
+            .map { it.download }
+            .filter { it.status == DownloadStatus.DOWNLOADED && it.item.seriesId == seriesId }
+            .mapNotNull(EpisodeQueueBuilder::toEntry)
+        return EpisodeQueueBuilder.build(candidates, current)
     }
 
     fun download(download: DownloadEntity) {
